@@ -1,4 +1,4 @@
-// AutoUpdateClient ? Game auto-updater with server-selection & AutoPlay popup
+// AutoUpdateClient — Game auto-updater with server-selection & AutoPlay popup
 //
 // UpdaterConfig.ini:
 //   [ServerList]  1_Server=Name   1_host=http://...
@@ -7,6 +7,8 @@
 //   [FontEdit]    FontDir=...  FontText=...
 //   [GameConfig]  Graphics=3D  DisplayMode=fullscreen  Resolution=1024x768  ScreenshotPath=
 //   [Updater]     GameExe=Game.exe
+//   [AutoVLBS]    Exe=AutoVLBS.exe   Label=Mo AutoVLBS
+//   [AutoPK]      Exe=AutoPK.exe     Label=Mo AutoPK
 
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
@@ -36,6 +38,8 @@ static const wchar_t* kDefaultGameExe = L"Game.exe";
 #define IDC_BTN_CHECK       101
 #define IDC_BTN_GAME        102
 #define IDC_BTN_CONFIG      103
+#define IDC_BTN_AUTOVLBS    104   // NEW: Mo AutoVLBS
+#define IDC_BTN_AUTOPK      105   // NEW: Mo AutoPK
 #define IDC_SERVER_BASE     200
 #define IDC_AUTO_BASE       300
 #define IDC_FONT_BTN        350
@@ -69,26 +73,36 @@ static std::vector<AutoPlayEntry> g_autoPlay;
 static std::wstring               g_fontDir;
 static std::wstring               g_fontText;
 
+// ---- AutoVLBS / AutoPK config -------------------------------------------- //
+struct QuickLaunchEntry { std::wstring exe; std::wstring label; };
+static QuickLaunchEntry g_autoVLBS;
+static QuickLaunchEntry g_autoPK;
+
 // ---- Game config ---------------------------------------------------------- //
 struct GameConfig
 {
-    std::wstring graphics;       // "2D" or "3D"
-    std::wstring displayMode;    // "windowed" or "fullscreen"
-    std::wstring resolution;     // "800x600" or "1024x768"
+    std::wstring graphics;
+    std::wstring displayMode;
+    std::wstring resolution;
     std::wstring screenshotPath;
-    std::wstring packageDir;     // folder containing resolution package files (default: "Package")
-    std::wstring packageDestFile;// destination file to overwrite (default: "package.ini")
+    std::wstring packageDir;
+    std::wstring packageDestFile;
 };
 static GameConfig g_gameConfig;
 
 // ---- Dynamic layout ------------------------------------------------------- //
 struct LayoutData
 {
-    static constexpr int W=480, ML=12, MR=40, BW=140, BG=8;
+    static constexpr int W=480, ML=12, MR=40, BG=8;
+    // Row 1: 3 buttons (Mo Auto | Vao Game | Cau hinh)
+    // Row 2: 2 buttons (Mo AutoVLBS | Mo AutoPK) — full width split
+    static constexpr int BW=140;   // width for row-1 buttons
+    static constexpr int BW2=224;  // width for row-2 buttons  (2*224+8 = 456 fits in 480-12-12=456)
     int sepY=-1, statusY=0, statusH=20;
     int fileLY=0, fileLH=16, fileBY=0, fileBH=18;
     int ovrLY=0,  ovrLH=16,  ovrBY=0,  ovrBH=18;
     int btnY=0,   btnH=34,   barW=0,   pctX=0;
+    int btn2Y=0;  // y for second button row
     static constexpr int pctW=30;
     int clientH=0;
 
@@ -100,7 +114,8 @@ struct LayoutData
         statusY=y; y+=statusH+8;
         fileLY=y; y+=fileLH+2; fileBY=y; y+=fileBH+8;
         ovrLY=y;  y+=ovrLH+2;  ovrBY=y;  y+=ovrBH+12;
-        btnY=y; clientH=y+btnH+10;
+        btnY=y;  y+=btnH+BG;
+        btn2Y=y; clientH=y+btnH+10;
     }
 };
 static LayoutData g_lay;
@@ -110,6 +125,7 @@ static HWND g_hwnd=nullptr,g_hwndSep=nullptr,g_hwndStatus=nullptr;
 static HWND g_hwndFileLabel=nullptr,g_hwndFileBar=nullptr,g_hwndFilePct=nullptr;
 static HWND g_hwndOverallLabel=nullptr,g_hwndOverallBar=nullptr,g_hwndOverallPct=nullptr;
 static HWND g_hwndBtnCheck=nullptr,g_hwndBtnGame=nullptr,g_hwndBtnConfig=nullptr;
+static HWND g_hwndBtnAutoVLBS=nullptr, g_hwndBtnAutoPK=nullptr;  // NEW
 
 // ---- GDI ------------------------------------------------------------------ //
 static HBRUSH g_hBrushBg=nullptr,g_hBrushBtn=nullptr,g_hBrushEdit=nullptr;
@@ -137,6 +153,22 @@ static void InitExeInfo()
 struct AppConfig { std::wstring gameExe; };
 static AppConfig    g_config;
 static std::wstring g_configPath;
+
+// Helper: launch an exe relative to our directory
+static void LaunchExe(const std::wstring& exeName, HWND hParent)
+{
+    if(exeName.empty()){
+        MessageBoxW(hParent,L"Chua cau hinh exe trong UpdaterConfig.ini.",L"Thong bao",MB_ICONINFORMATION);
+        return;
+    }
+    std::wstring ep = g_exe.dir + L"\\" + exeName;
+    for(auto& c : ep) if(c==L'/') c=L'\\';
+    if(GetFileAttributesW(ep.c_str())==INVALID_FILE_ATTRIBUTES){
+        MessageBoxW(hParent,(L"Khong tim thay:\n"+ep).c_str(),L"Khong tim thay",MB_ICONWARNING);
+        return;
+    }
+    ShellExecuteW(nullptr,L"open",ep.c_str(),nullptr,g_exe.dir.c_str(),SW_SHOWNORMAL);
+}
 
 static void LoadConfig()
 {
@@ -175,7 +207,20 @@ static void LoadConfig()
     GetPrivateProfileStringW(L"GameConfig",L"PackageDestFile",L"package.ini",buf,_countof(buf),g_configPath.c_str());g_gameConfig.packageDestFile=buf;
     // [Updater]
     GetPrivateProfileStringW(L"Updater",L"GameExe",kDefaultGameExe,buf,_countof(buf),g_configPath.c_str());g_config.gameExe=buf;
+
+    // [AutoVLBS] — NEW
+    GetPrivateProfileStringW(L"AutoVLBS",L"Exe",L"",buf,_countof(buf),g_configPath.c_str());
+    g_autoVLBS.exe=buf;
+    GetPrivateProfileStringW(L"AutoVLBS",L"Label",L"Mo AutoVLBS",buf,_countof(buf),g_configPath.c_str());
+    g_autoVLBS.label=buf;
+
+    // [AutoPK] — NEW
+    GetPrivateProfileStringW(L"AutoPK",L"Exe",L"",buf,_countof(buf),g_configPath.c_str());
+    g_autoPK.exe=buf;
+    GetPrivateProfileStringW(L"AutoPK",L"Label",L"Mo AutoPK",buf,_countof(buf),g_configPath.c_str());
+    g_autoPK.label=buf;
 }
+
 static void SaveSelectedServer(){WritePrivateProfileStringW(L"LastSel",L"PicSel",std::to_wstring(g_selectedServer).c_str(),g_configPath.c_str());}
 static void SaveGameConfig()
 {
@@ -342,10 +387,8 @@ static void ShowAutoPlayDialog(HWND hParent)
 }
 
 // ==========================================================================
-//  GAME CONFIG DIALOG  ? "Thiet lap cau hinh"
+//  GAME CONFIG DIALOG
 // ==========================================================================
-
-// Dark brown palette matching game UI style
 static const COLORREF kCfgBg      = RGB(75,  45, 20);
 static const COLORREF kCfgTitleBg = RGB(155, 30, 30);
 static const COLORREF kCfgGrpBg   = RGB(90,  55, 28);
@@ -356,15 +399,31 @@ static const COLORREF kCfgEditBg  = RGB(50,  30, 10);
 static const COLORREF kCfgText    = RGB(240, 210,170);
 static const COLORREF kCfgBtnText = RGB(255, 255,255);
 
-// Radio group identifiers: which option is selected (0 or 1)
+static const wchar_t* kResStr[] = { L"800x600", L"1024x768" };
+
+static void ApplyResolutionPackage(int resIdx)
+{
+    const std::wstring resName = kResStr[resIdx];
+    std::wstring src = g_exe.dir + L"\\" + g_gameConfig.packageDir + L"\\" + resName + L".ini";
+    std::wstring dst = g_exe.dir + L"\\" + g_gameConfig.packageDestFile;
+    for (auto& c : src) if (c == L'/') c = L'\\';
+    for (auto& c : dst) if (c == L'/') c = L'\\';
+    if (GetFileAttributesW(src.c_str()) == INVALID_FILE_ATTRIBUTES){
+        MessageBoxW(nullptr,(L"Khong tim thay file:\n" + src).c_str(),L"Package", MB_ICONWARNING | MB_OK);
+        return;
+    }
+    if (!CopyFileW(src.c_str(), dst.c_str(), FALSE)){
+        MessageBoxW(nullptr,(L"Khong the chep file:\n" + src + L"\n->\n" + dst).c_str(),L"Package", MB_ICONERROR | MB_OK);
+    }
+}
+
 struct GameCfgState
 {
-    int  selGraphics  = 1;   // 0=2D,  1=3D
-    int  selDisplay   = 1;   // 0=win, 1=full
-    int  selRes       = 1;   // 0=800, 1=1024
+    int  selGraphics  = 1;
+    int  selDisplay   = 1;
+    int  selRes       = 1;
     std::wstring screenshotPath;
-
-    HWND hR[3][2]     = {};  // [group][option] radio HWNDs
+    HWND hR[3][2]     = {};
     HWND hScreenEdit  = nullptr;
     HFONT hTitleFont  = nullptr;
     HFONT hBtnFont    = nullptr;
@@ -376,62 +435,22 @@ struct GameCfgState
     bool done      = false;
 };
 
-// Resolution strings matching radio button order (index 0 and 1)
-static const wchar_t* kResStr[] = { L"800x600", L"1024x768" };
-
-// Copy Package\{resolution}.ini -> package.ini (same folder as exe)
-// Called immediately when user clicks a resolution radio button.
-static void ApplyResolutionPackage(int resIdx)
-{
-    const std::wstring resName = kResStr[resIdx];
-
-    std::wstring src = g_exe.dir + L"\\" + g_gameConfig.packageDir + L"\\" + resName + L".ini";
-    std::wstring dst = g_exe.dir + L"\\" + g_gameConfig.packageDestFile;
-    for (auto& c : src) if (c == L'/') c = L'\\';
-    for (auto& c : dst) if (c == L'/') c = L'\\';
-
-    if (GetFileAttributesW(src.c_str()) == INVALID_FILE_ATTRIBUTES)
-    {
-        // Source file missing ? show a brief warning but don't block the user
-        MessageBoxW(nullptr,
-            (L"Khong tim thay file:\n" + src).c_str(),
-            L"Package", MB_ICONWARNING | MB_OK);
-        return;
-    }
-
-    if (!CopyFileW(src.c_str(), dst.c_str(), FALSE))
-    {
-        MessageBoxW(nullptr,
-            (L"Khong the chep file:\n" + src + L"\n->\n" + dst).c_str(),
-            L"Package", MB_ICONERROR | MB_OK);
-    }
-    // Success: silent ? the change is instant, user can see it next game launch
-}
-
-// Draw one owner-draw radio button
 static void DrawCfgRadio(DRAWITEMSTRUCT* dis, GameCfgState* st)
 {
     HDC dc = dis->hDC; RECT r = dis->rcItem;
     HBRUSH hbg = CreateSolidBrush(kCfgGrpBg); FillRect(dc, &r, hbg); DeleteObject(hbg);
-
-    // Determine checked state
     bool checked = false;
     for(int g=0;g<3;g++) for(int o=0;o<2;o++) if(dis->hwndItem==st->hR[g][o]) {
         if(g==0) checked=(st->selGraphics==o);
         else if(g==1) checked=(st->selDisplay==o);
         else          checked=(st->selRes==o);
     }
-
     int cy=(r.top+r.bottom)/2, cx=r.left+18;
-
-    // Outer ring
     HPEN hp = CreatePen(PS_SOLID, 2, RGB(220,200,175));
     HPEN op = (HPEN)SelectObject(dc, hp);
     SelectObject(dc, GetStockObject(NULL_BRUSH));
     Ellipse(dc, cx-10, cy-10, cx+10, cy+10);
     SelectObject(dc, op); DeleteObject(hp);
-
-    // Filled dot if selected
     if(checked) {
         HBRUSH hfill = CreateSolidBrush(RGB(255,255,255));
         HPEN   hp2   = CreatePen(PS_SOLID,1,RGB(255,255,255));
@@ -439,8 +458,6 @@ static void DrawCfgRadio(DRAWITEMSTRUCT* dis, GameCfgState* st)
         Ellipse(dc, cx-5, cy-5, cx+5, cy+5);
         DeleteObject(hfill); DeleteObject(hp2);
     }
-
-    // Text
     wchar_t txt[128]={}; GetWindowTextW(dis->hwndItem, txt, 128);
     HFONT of = (HFONT)SelectObject(dc, st->hLblFont);
     RECT tr = {cx+14, r.top, r.right, r.bottom};
@@ -449,7 +466,6 @@ static void DrawCfgRadio(DRAWITEMSTRUCT* dis, GameCfgState* st)
     SelectObject(dc, of);
 }
 
-// Draw one owner-draw push button (Luu / Huy bo / Browse)
 static void DrawCfgBtn(DRAWITEMSTRUCT* dis, GameCfgState* st, COLORREF face=kCfgBtnFace)
 {
     HDC dc=dis->hDC; RECT r=dis->rcItem;
@@ -467,66 +483,49 @@ static void DrawCfgBtn(DRAWITEMSTRUCT* dis, GameCfgState* st, COLORREF face=kCfg
 static LRESULT CALLBACK GameConfigProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 {
     auto* st = (GameCfgState*)GetWindowLongPtrW(hwnd, GWLP_USERDATA);
-
     switch(msg)
     {
     case WM_CREATE:
     {
         st = (GameCfgState*)((CREATESTRUCTW*)lParam)->lpCreateParams;
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, (LONG_PTR)st);
-
         st->hTitleFont = CreateFontW(18,0,0,0,FW_BOLD,0,0,0,DEFAULT_CHARSET,0,0,CLEARTYPE_QUALITY,DEFAULT_PITCH|FF_SWISS,L"Segoe UI");
         st->hBtnFont   = CreateFontW(15,0,0,0,FW_BOLD,0,0,0,DEFAULT_CHARSET,0,0,CLEARTYPE_QUALITY,DEFAULT_PITCH|FF_SWISS,L"Segoe UI");
         st->hLblFont   = CreateFontW(14,0,0,0,FW_NORMAL,0,0,0,DEFAULT_CHARSET,0,0,CLEARTYPE_QUALITY,DEFAULT_PITCH|FF_SWISS,L"Segoe UI");
         st->hBrushBg   = CreateSolidBrush(kCfgBg);
         st->hBrushEdit = CreateSolidBrush(kCfgEditBg);
         st->hBrushGrp  = CreateSolidBrush(kCfgGrpBg);
-
         HINSTANCE hi = GetModuleHandleW(nullptr);
-        constexpr int GX=12, GW=396, RH=42;
-
-        // Group 1 "Do Hoa" ? 3 radio buttons owner-draw inside
-        // y=58..138 (h=80)
+        constexpr int GX=12, RH=42;
         st->hR[0][0] = CreateWindowExW(0,L"BUTTON",L"2D",   WS_CHILD|WS_VISIBLE|BS_OWNERDRAW, GX+10, 80, 175, RH, hwnd, (HMENU)IDC_CFG_R2D,  hi, nullptr);
         st->hR[0][1] = CreateWindowExW(0,L"BUTTON",L"3D",   WS_CHILD|WS_VISIBLE|BS_OWNERDRAW, GX+200, 80, 175, RH, hwnd, (HMENU)IDC_CFG_R3D,  hi, nullptr);
-        // Group 2 "Che do hien thi" y=146..226
         st->hR[1][0] = CreateWindowExW(0,L"BUTTON",L"Cua so",        WS_CHILD|WS_VISIBLE|BS_OWNERDRAW, GX+10, 168, 175, RH, hwnd, (HMENU)IDC_CFG_RWIN,  hi, nullptr);
         st->hR[1][1] = CreateWindowExW(0,L"BUTTON",L"Toan man hinh", WS_CHILD|WS_VISIBLE|BS_OWNERDRAW, GX+200, 168, 175, RH, hwnd, (HMENU)IDC_CFG_RFULL, hi, nullptr);
-        // Group 3 "Do phan giai" y=234..314
         st->hR[2][0] = CreateWindowExW(0,L"BUTTON",L"800x600",  WS_CHILD|WS_VISIBLE|BS_OWNERDRAW, GX+10, 256, 175, RH, hwnd, (HMENU)IDC_CFG_R800,  hi, nullptr);
         st->hR[2][1] = CreateWindowExW(0,L"BUTTON",L"1024x768", WS_CHILD|WS_VISIBLE|BS_OWNERDRAW, GX+200, 256, 175, RH, hwnd, (HMENU)IDC_CFG_R1024, hi, nullptr);
-        // Screenshot edit
         st->hScreenEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", st->screenshotPath.c_str(),
             WS_CHILD|WS_VISIBLE|ES_AUTOHSCROLL, GX, 352, 280, 26, hwnd, (HMENU)IDC_CFG_SCREDIT, hi, nullptr);
         SendMessageW(st->hScreenEdit, WM_SETFONT, (WPARAM)st->hLblFont, TRUE);
         SetWindowTheme(st->hScreenEdit, L"", L"");
-        // Browse button
         CreateWindowExW(0,L"BUTTON",L"Thay doi",WS_CHILD|WS_VISIBLE|BS_OWNERDRAW, GX+288,352,108,26,hwnd,(HMENU)IDC_CFG_BROWSE,hi,nullptr);
-        // Luu / Huy bo
         CreateWindowExW(0,L"BUTTON",L"Luu",   WS_CHILD|WS_VISIBLE|BS_OWNERDRAW,  GX,    398,185,36,hwnd,(HMENU)IDC_CFG_SAVE,  hi,nullptr);
         CreateWindowExW(0,L"BUTTON",L"Huy bo",WS_CHILD|WS_VISIBLE|BS_OWNERDRAW,  GX+213,398,185,36,hwnd,(HMENU)IDC_CFG_CANCEL,hi,nullptr);
         return 0;
     }
-
     case WM_DRAWITEM:
     {
         if(!st) return FALSE;
         auto* dis = (DRAWITEMSTRUCT*)lParam;
         int id = (int)dis->CtlID;
-        // Radio buttons
         if(id==IDC_CFG_R2D||id==IDC_CFG_R3D||id==IDC_CFG_RWIN||
            id==IDC_CFG_RFULL||id==IDC_CFG_R800||id==IDC_CFG_R1024)
         { DrawCfgRadio(dis, st); return TRUE; }
-        // Push buttons
         DrawCfgBtn(dis, st); return TRUE;
     }
-
     case WM_COMMAND:
     {
         if(!st) return 0;
         int id=LOWORD(wParam);
-
-        // Radio clicks ? update selection + redraw group
         auto HitRadio=[&](int grp, int opt){
             int&sel=(grp==0)?st->selGraphics:(grp==1)?st->selDisplay:st->selRes;
             sel=opt;
@@ -538,9 +537,7 @@ static LRESULT CALLBACK GameConfigProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
         if(id==IDC_CFG_RFULL){HitRadio(1,1);return 0;}
         if(id==IDC_CFG_R800) {HitRadio(2,0); ApplyResolutionPackage(0); return 0;}
         if(id==IDC_CFG_R1024){HitRadio(2,1); ApplyResolutionPackage(1); return 0;}
-
         if(id==IDC_CFG_BROWSE){
-            // Folder browser for screenshot path
             BROWSEINFOW bi={};
             bi.hwndOwner=hwnd; bi.lpszTitle=L"Chon thu muc luu screenshot:";
             bi.ulFlags=BIF_RETURNONLYFSDIRS|BIF_NEWDIALOGSTYLE;
@@ -556,29 +553,22 @@ static LRESULT CALLBACK GameConfigProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
         if(id==IDC_CFG_CANCEL){DestroyWindow(hwnd);return 0;}
         return 0;
     }
-
     case WM_PAINT:
     {
         PAINTSTRUCT ps;HDC dc=BeginPaint(hwnd,&ps);
         RECT wr;GetClientRect(hwnd,&wr);
-
-        // Title strip
         {RECT tr={0,0,wr.right,48};HBRUSH hbr=CreateSolidBrush(kCfgTitleBg);FillRect(dc,&tr,hbr);DeleteObject(hbr);
          HFONT of=(HFONT)SelectObject(dc,st?st->hTitleFont:nullptr);
          SetTextColor(dc,RGB(255,255,255));SetBkMode(dc,TRANSPARENT);
          DrawTextW(dc,L"THIET LAP CAU HINH",-1,&tr,DT_CENTER|DT_VCENTER|DT_SINGLELINE);
          if(of)SelectObject(dc,of);}
-
         HFONT hlbl=st?st->hLblFont:nullptr;
-
-        // Helper: draw one group box frame + label
         auto DrawGroup=[&](int y,int h,const wchar_t*label){
             RECT gr={12,y,12+396,y+h};
             HBRUSH hbr=CreateSolidBrush(kCfgGrpBg);FillRect(dc,&gr,hbr);DeleteObject(hbr);
             HPEN hp=CreatePen(PS_SOLID,1,kCfgGrpBrd);HPEN op=(HPEN)SelectObject(dc,hp);
             SelectObject(dc,GetStockObject(NULL_BRUSH));Rectangle(dc,gr.left,gr.top,gr.right,gr.bottom);
             SelectObject(dc,op);DeleteObject(hp);
-            // Label text over top border
             RECT lr={gr.left+10,gr.top-9,gr.left+200,gr.top+9};
             HBRUSH lbr=CreateSolidBrush(kCfgBg);FillRect(dc,&lr,lbr);DeleteObject(lbr);
             HFONT of2=(HFONT)SelectObject(dc,hlbl);
@@ -589,31 +579,24 @@ static LRESULT CALLBACK GameConfigProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
         DrawGroup(58,  80, L"Do Hoa");
         DrawGroup(146, 80, L"Che do hien thi");
         DrawGroup(234, 80, L"Do phan giai");
-
-        // Screenshot label
         {RECT lr={12,330,410,348};SetTextColor(dc,kCfgText);SetBkMode(dc,TRANSPARENT);
          HFONT of2=(HFONT)SelectObject(dc,hlbl);
          DrawTextW(dc,L"Duong dan luu screenshot:",-1,&lr,DT_LEFT|DT_VCENTER|DT_SINGLELINE);
          if(of2)SelectObject(dc,of2);}
-
         EndPaint(hwnd,&ps);return 0;
     }
-
     case WM_CTLCOLOREDIT:
         SetBkColor((HDC)wParam, kCfgEditBg); SetTextColor((HDC)wParam, RGB(220,200,180));
         return (LRESULT)(st ? st->hBrushEdit : GetStockObject(BLACK_BRUSH));
-
     case WM_CTLCOLORSTATIC:
         SetBkColor((HDC)wParam, kCfgGrpBg); SetTextColor((HDC)wParam, kCfgText);
         return (LRESULT)(st ? st->hBrushGrp : GetStockObject(BLACK_BRUSH));
-
     case WM_ERASEBKGND:
     {
         RECT r; GetClientRect(hwnd, &r);
         HBRUSH hbr=CreateSolidBrush(kCfgBg); FillRect((HDC)wParam,&r,hbr); DeleteObject(hbr);
         return 1;
     }
-
     case WM_DESTROY:
         if(st){
             if(st->hTitleFont)DeleteObject(st->hTitleFont);
@@ -638,20 +621,17 @@ static void ShowGameConfigDialog(HWND hParent)
         wc.lpszClassName=L"GameConfigDlg";wc.hCursor=LoadCursor(nullptr,IDC_ARROW);
         RegisterClassExW(&wc);reg=true;
     }
-
     GameCfgState st;
     st.selGraphics  = (g_gameConfig.graphics    == L"2D") ? 0 : 1;
     st.selDisplay   = (g_gameConfig.displayMode == L"windowed") ? 0 : 1;
     st.selRes       = (g_gameConfig.resolution  == L"800x600") ? 0 : 1;
     st.screenshotPath = g_gameConfig.screenshotPath;
-
     constexpr int W=420, H=450;
     RECT pr; GetWindowRect(hParent,&pr);
     HWND hDlg=CreateWindowExW(WS_EX_DLGMODALFRAME|WS_EX_TOPMOST,
         L"GameConfigDlg",L"",WS_POPUP|WS_BORDER,
         pr.left+(pr.right-pr.left-W)/2, pr.top+(pr.bottom-pr.top-H)/2, W,H,
         hParent,nullptr,GetModuleHandleW(nullptr),&st);
-
     EnableWindow(hParent,FALSE); ShowWindow(hDlg,SW_SHOW);
     MSG msg;
     while(!st.done){
@@ -659,7 +639,6 @@ static void ShowGameConfigDialog(HWND hParent)
         if(!IsDialogMessageW(hDlg,&msg)){TranslateMessage(&msg);DispatchMessageW(&msg);}
     }
     EnableWindow(hParent,TRUE); SetForegroundWindow(hParent);
-
     if(st.confirmed){
         g_gameConfig.graphics    = st.selGraphics==0 ? L"2D"       : L"3D";
         g_gameConfig.displayMode = st.selDisplay ==0 ? L"windowed"  : L"fullscreen";
@@ -688,8 +667,19 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
             return 0;
         }
         if(id==IDC_BTN_CHECK){ShowAutoPlayDialog(hwnd);return 0;}
-        if(id==IDC_BTN_GAME){auto gp=g_exe.dir+L"\\"+g_config.gameExe;if(GetFileAttributesW(gp.c_str())==INVALID_FILE_ATTRIBUTES){MessageBoxW(hwnd,(L"Khong tim thay:\n"+gp).c_str(),L"Khong tim thay",MB_ICONWARNING);return 0;}ShellExecuteW(nullptr,L"open",gp.c_str(),nullptr,g_exe.dir.c_str(),SW_SHOWNORMAL);return 0;}
+        if(id==IDC_BTN_GAME){
+            auto gp=g_exe.dir+L"\\"+g_config.gameExe;
+            if(GetFileAttributesW(gp.c_str())==INVALID_FILE_ATTRIBUTES){MessageBoxW(hwnd,(L"Khong tim thay:\n"+gp).c_str(),L"Khong tim thay",MB_ICONWARNING);return 0;}
+            ShellExecuteW(nullptr,L"open",gp.c_str(),nullptr,g_exe.dir.c_str(),SW_SHOWNORMAL);return 0;
+        }
         if(id==IDC_BTN_CONFIG){ShowGameConfigDialog(hwnd);return 0;}
+
+        // NEW: Mo AutoVLBS
+        if(id==IDC_BTN_AUTOVLBS){LaunchExe(g_autoVLBS.exe, hwnd);return 0;}
+
+        // NEW: Mo AutoPK
+        if(id==IDC_BTN_AUTOPK){LaunchExe(g_autoPK.exe, hwnd);return 0;}
+
         return 0;
     }
     case WM_CTLCOLORSTATIC:SetBkColor((HDC)wParam,RGB(28,28,28));SetTextColor((HDC)wParam,RGB(200,200,200));return(LRESULT)g_hBrushBg;
@@ -746,11 +736,18 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int)
     SendMessageW(g_hwndOverallBar,PBM_SETRANGE32,0,1000);SendMessageW(g_hwndOverallBar,PBM_SETBARCOLOR,0,RGB(0,200,120));SendMessageW(g_hwndOverallBar,PBM_SETBKCOLOR,0,RGB(55,55,55));
     g_hwndOverallPct=CreateWindowExW(0,L"STATIC",L"--",WS_CHILD|WS_VISIBLE|SS_CENTER,g_lay.pctX,g_lay.ovrBY,g_lay.pctW,g_lay.ovrBH,g_hwnd,nullptr,hInst,nullptr);SendMessageW(g_hwndOverallPct,WM_SETFONT,(WPARAM)g_hFontSmall,TRUE);
 
-    int B1=g_lay.ML,B2=B1+g_lay.BW+g_lay.BG,B3=B2+g_lay.BW+g_lay.BG;
-    g_hwndBtnCheck =MakeBtn(hInst,L"Mo Auto",  IDC_BTN_CHECK, B1,g_lay.btnY,g_lay.BW,g_lay.btnH,g_hwnd);
-    g_hwndBtnGame  =MakeBtn(hInst,L"Vao Game", IDC_BTN_GAME,  B2,g_lay.btnY,g_lay.BW,g_lay.btnH,g_hwnd);
-    g_hwndBtnConfig=MakeBtn(hInst,L"Cau hinh", IDC_BTN_CONFIG,B3,g_lay.btnY,g_lay.BW,g_lay.btnH,g_hwnd);
+    // ---- Row 1: Mo Auto | Vao Game | Cau hinh ----------------------------- //
+    int B1=g_lay.ML, B2=B1+g_lay.BW+g_lay.BG, B3=B2+g_lay.BW+g_lay.BG;
+    g_hwndBtnCheck =MakeBtn(hInst,L"Mo Auto",   IDC_BTN_CHECK, B1,g_lay.btnY,g_lay.BW,g_lay.btnH,g_hwnd);
+    g_hwndBtnGame  =MakeBtn(hInst,L"Vao Game",  IDC_BTN_GAME,  B2,g_lay.btnY,g_lay.BW,g_lay.btnH,g_hwnd);
+    g_hwndBtnConfig=MakeBtn(hInst,L"Cau hinh",  IDC_BTN_CONFIG,B3,g_lay.btnY,g_lay.BW,g_lay.btnH,g_hwnd);
     EnableWindow(g_hwndBtnGame,FALSE);
+
+    // ---- Row 2: Mo AutoVLBS | Mo AutoPK ----------------------------------- //
+    // Use label from INI (g_autoVLBS.label / g_autoPK.label) so server can rename via config
+    int R2_B1=g_lay.ML, R2_B2=R2_B1+g_lay.BW2+g_lay.BG;
+    g_hwndBtnAutoVLBS=MakeBtn(hInst,g_autoVLBS.label.c_str(),IDC_BTN_AUTOVLBS,R2_B1,g_lay.btn2Y,g_lay.BW2,g_lay.btnH,g_hwnd);
+    g_hwndBtnAutoPK  =MakeBtn(hInst,g_autoPK.label.c_str(),  IDC_BTN_AUTOPK,  R2_B2,g_lay.btn2Y,g_lay.BW2,g_lay.btnH,g_hwnd);
 
     ShowWindow(g_hwnd,SW_SHOW);UpdateWindow(g_hwnd);
     if(g_selectedServer>0&&!GetServerURL().empty())std::thread(RunUpdate).detach();
